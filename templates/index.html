@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sistem Deteksi Jatuh dengan AI</title>
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/hospital-theme.css') }}">
+    
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="brand">
+                <h1>Hospital Fall Detection</h1>
+                <p>Real-time AI monitoring • Sistem Deteksi Jatuh</p>
+            </div>
+            <div class="controls right">
+                <button class="btn" id="pause-stream">Jeda Stream</button>
+                <button class="btn secondary" id="snapshot" title="Simpan snapshot dari tampilan kamera">Ambil Snapshot</button>
+            </div>
+        </div>
+
+        <div class="layout">
+            <aside class="card patient-card">
+                <div class="patient-photo">
+                    <div style="text-align:center;padding:12px">
+                        <div style="font-size:18px;font-weight:700;color:#ffffff">Kamera</div>
+                        <div style="font-size:12px;margin-top:6px;color:rgba(255,255,255,0.95)">Area pengawasan pasien (tampilan langsung)</div>
+                    </div>
+                </div>
+                <div style="font-size:13px;color:var(--muted);margin-top:8px">Tekan "Ambil Snapshot" untuk menyimpan gambar dari feed. Snapshot dapat digunakan untuk dokumentasi atau pemeriksaan lebih lanjut.</div>
+
+                <!-- Status Pasien Section -->
+                <div style="margin-top:16px;padding:12px;background:linear-gradient(135deg, rgba(11,111,166,0.08), rgba(0,180,216,0.08));border-radius:8px;border-left:4px solid var(--primary)">
+                    <div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Status Pasien</div>
+                    <div style="font-size:14px;font-weight:600;color:var(--primary);margin-bottom:6px" id="patient-status-main">Berdiri - Normal</div>
+                    <div style="font-size:12px;color:var(--muted);line-height:1.5" id="patient-status-detail">Pasien dalam kondisi normal dan aktif</div>
+                </div>
+
+                <div class="status-grid" style="margin-top:12px">
+                    <div class="status-item">
+                        <div class="label">Deteksi Jatuh</div>
+                        <div class="value" id="status-fall">NORMAL</div>
+                    </div>
+
+                    <div class="status-item">
+                        <div class="label">Terakhir Update</div>
+                        <div class="value" id="last-update">-</div>
+                    </div>
+                </div>
+
+                <!-- Additional Info -->
+                <div style="margin-top:12px;padding:8px;background:rgba(0,180,216,0.06);border-radius:6px;font-size:12px;color:var(--muted);line-height:1.4">
+                    <span style="display:block;margin-bottom:4px"><strong>Durasi Aktivitas:</strong> <span id="duration-time">-</span></span>
+                    <span style="display:block"><strong>Monitor:</strong> Real-time 24/7</span>
+                </div>
+            </aside>
+
+            <main class="card video-card">
+                <div id="alert-area"></div>
+                <div class="alert-banner danger" id="fall-alert" style="display:none">JATUH TERDETEKSI</div>
+                <div class="alert-banner info" id="sleep-indicator" style="display:none">Tidur di furniture terdeteksi</div>
+
+                <img id="video-feed" class="video-frame" src="{{ url_for('video_feed') }}" alt="Tampilan kamera">
+
+                <div style="padding:12px;display:flex;justify-content:space-between;align-items:center">
+                    <div class="video-caption">
+                        Live Feed
+                    </div>
+                    <div>
+                        <!-- hidden audio element for programmatic playback on fall -->
+                        <audio id="audio-player" style="display:none" autoplay>
+                            <source src="{{ url_for('static', filename='assets/Efek suara jatuh.mp3') }}" type="audio/mpeg">
+                        </audio>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script>
+    const audioPlayer = document.getElementById('audio-player'); // may be null if removed
+        const fallAlert = document.getElementById('fall-alert');
+        const sleepIndicator = document.getElementById('sleep-indicator');
+        const lastUpdate = document.getElementById('last-update');
+        const statusFall = document.getElementById('status-fall');
+        const pauseBtn = document.getElementById('pause-stream');
+        const snapshotBtn = document.getElementById('snapshot');
+        const videoFeed = document.getElementById('video-feed');
+        const patientStatusMain = document.getElementById('patient-status-main');
+        const patientStatusDetail = document.getElementById('patient-status-detail');
+        const durationTime = document.getElementById('duration-time');
+
+        let lastFallState = false;
+        let lastSleepState = false;
+        let polling = true;
+        let currentPosture = 'Berdiri';
+        let postureStartTime = Date.now();
+        let isOnFurniture = false;
+        let furnitureName = '';
+
+        // Function to update patient status display
+        function updatePatientStatus(fallDetected, sleepDetected, furniture, duration) {
+            if (fallDetected) {
+                patientStatusMain.textContent = 'JATUH - Segera Kirim Bantuan';
+                patientStatusMain.style.color = 'var(--danger)';
+                patientStatusDetail.textContent = 'Pasien terdeteksi jatuh. Alarm sedang aktif!';
+            } else if (sleepDetected) {
+                patientStatusMain.textContent = 'Tidur di ' + (furniture || 'Furniture');
+                patientStatusMain.style.color = 'var(--accent)';
+                patientStatusDetail.textContent = 'Pasien sedang berbaring/tidur di ' + (furniture || 'furniture');
+            } else {
+                patientStatusMain.textContent = currentPosture + ' - Normal';
+                patientStatusMain.style.color = 'var(--primary)';
+                
+                if (currentPosture === 'Berdiri') {
+                    if (duration >= 10) {
+                        patientStatusDetail.textContent = `Sudah berdiri ${duration} detik (Perhatian: berdiri terlalu lama)`;
+                        patientStatusMain.style.color = '#ff9800'; // Warna warning
+                    } else {
+                        patientStatusDetail.textContent = 'Pasien dalam kondisi normal dan aktif';
+                    }
+                } else if (currentPosture === 'Duduk') {
+                    const furnitureText = furniture ? ` di ${furniture}` : '';
+                    if (duration >= 10) {
+                        patientStatusDetail.textContent = `Sudah duduk${furnitureText} ${duration} detik (Perhatian: duduk terlalu lama)`;
+                        patientStatusMain.style.color = '#ff9800'; // Warna warning
+                    } else {
+                        patientStatusDetail.textContent = `Pasien sedang duduk${furnitureText}. Kondisi stabil`;
+                    }
+                } else {
+                    patientStatusDetail.textContent = 'Pasien dalam posisi horizontal';
+                }
+            }
+        }
+
+        // Function to format duration
+        function formatDuration(ms) {
+            const seconds = Math.floor((ms / 1000) % 60);
+            const minutes = Math.floor((ms / (1000 * 60)) % 60);
+            const hours = Math.floor(ms / (1000 * 60 * 60));
+            
+            if (hours > 0) return `${hours}j ${minutes}m`;
+            if (minutes > 0) return `${minutes}m ${seconds}d`;
+            return `${seconds}d`;
+        }
+
+        // Polling untuk cek status jatuh dan tidur
+        async function pollStatus(){
+            try {
+                const response = await fetch('/fall_status');
+                const data = await response.json();
+
+                // Update current posture from server
+                if (data.current_posture) {
+                    currentPosture = data.current_posture;
+                }
+
+                // Update furniture info from server
+                if (data.current_furniture) {
+                    furnitureName = data.current_furniture;
+                }
+
+                // update last update time
+                lastUpdate.textContent = new Date().toLocaleTimeString();
+
+                // Update status label
+                statusFall.textContent = data.fall_detected ? 'JATUH' : 'NORMAL';
+
+                // Update duration
+                const duration = Date.now() - postureStartTime;
+                durationTime.textContent = formatDuration(duration);
+
+                // Update patient status display with furniture and duration info
+                updatePatientStatus(data.fall_detected, data.sleep_detected, data.current_furniture, data.activity_duration);
+
+                // === Handling Fall Detection ===
+                if (data.fall_detected && !lastFallState) {
+                    if (audioPlayer) {
+                        audioPlayer.currentTime = 0;
+                        audioPlayer.loop = true;
+                        let playPromise = audioPlayer.play();
+                        if (playPromise !== undefined) {
+                            playPromise.catch(error => {
+                                console.log('Audio autoplay was prevented:', error);
+                                // Retry play
+                                audioPlayer.play().catch(e => console.log('Audio play failed:', e));
+                            });
+                        }
+                    }
+                    fallAlert.style.display = 'flex';
+                    lastFallState = true;
+                }
+
+                // Jika tidak lagi jatuh, hentikan audio
+                if (!data.fall_detected && lastFallState) {
+                    if (audioPlayer) {
+                        audioPlayer.pause();
+                        audioPlayer.currentTime = 0;
+                    }
+                    fallAlert.style.display = 'none';
+                    lastFallState = false;
+                    postureStartTime = Date.now(); // Reset timer when recovering
+                }
+
+                // === Handling Sleep Detection ===
+                if (data.sleep_detected && !lastSleepState) {
+                    sleepIndicator.style.display = 'flex';
+                    lastSleepState = true;
+                }
+
+                if (!data.sleep_detected && lastSleepState) {
+                    sleepIndicator.style.display = 'none';
+                    lastSleepState = false;
+                }
+
+            } catch (error) {
+                console.error('Error checking status:', error);
+            }
+        }
+
+        // Start polling loop
+        setInterval(() => { if(polling) pollStatus(); }, 600);
+
+        // Pause / resume stream
+        pauseBtn.addEventListener('click', () => {
+            if (videoFeed.src) {
+                if (videoFeed.src.endsWith('/video_feed')) {
+                    // stop by setting blank
+                    videoFeed.src = '';
+                    pauseBtn.textContent = 'Lanjutkan Stream';
+                } else {
+                    videoFeed.src = '/video_feed';
+                    pauseBtn.textContent = 'Jeda Stream';
+                }
+            }
+        });
+
+        // Snapshot: request latest encoded frame from server to avoid freezing stream
+        snapshotBtn.addEventListener('click', async () => {
+            try {
+                const resp = await fetch('/snapshot');
+                if (!resp.ok) throw new Error('Snapshot failed: ' + resp.status);
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `snapshot-${Date.now()}.jpg`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(url);
+            } catch (err) {
+                console.warn('Server snapshot failed, falling back to canvas method:', err);
+                // Fallback: try canvas approach (may not work for mjpeg streams)
+                const canvas = document.createElement('canvas');
+                const img = document.createElement('img');
+                img.crossOrigin = 'anonymous';
+                img.src = videoFeed.src;
+                img.onload = () => {
+                    canvas.width = img.naturalWidth || 640;
+                    canvas.height = img.naturalHeight || 480;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0);
+                    canvas.toBlob((blob) => {
+                        const a = document.createElement('a');
+                        a.href = URL.createObjectURL(blob);
+                        a.download = `snapshot-${Date.now()}.jpg`;
+                        a.click();
+                    }, 'image/jpeg');
+                };
+            }
+        });
+    </script>
+</body>
+</html>
